@@ -143,11 +143,56 @@ verify_elf32_16kb() {
   fi
 }
 
+# 校验产物能直接顶替 NDK 的 libc++_shared.so：
+#   * SONAME 必须是 libc++_shared.so，否则 App 的 DT_NEEDED 会写成别的名字，
+#     运行时找不到文件；
+#   * 不能依赖单独的 libc++abi.so / libunwind.so（AAR 只替换这一个文件，
+#     NDK 也不提供这些库），c++abi 必须是静态并进 libc++_shared.so；
+#   * 必须导出 __ndk1 命名空间的符号，NDK 头文件用的是 __ndk1 而不是 __1。
+verify_libcxx_layout() {
+  local so="$1"
+  local abi="$2"
+  local soname needed
+
+  soname="$("${READELF}" -d "${so}" | sed -n 's/.*(SONAME).*\[\(.*\)\].*/\1/p')"
+  if [[ "${soname}" != "libc++_shared.so" ]]; then
+    echo "ERROR: ${abi}: unexpected SONAME '${soname}' (want libc++_shared.so)" >&2
+    return 1
+  fi
+
+  needed="$("${READELF}" -d "${so}" | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p' |
+    grep -E '^(libc\+\+_shared|libc\+\+abi|libunwind|libstdc\+\+)\.so' || true)"
+  if [[ -n "${needed}" ]]; then
+    echo "ERROR: ${abi}: depends on ${needed}, which the AAR does not ship" >&2
+    return 1
+  fi
+
+  if ! "${READELF}" --dyn-syms --wide "${so}" |
+    awk '/__ndk1/ && $7 != "UND" {found = 1} END {exit !found}'; then
+    echo "ERROR: ${abi}: no __ndk1 symbols; built with the wrong ABI namespace" >&2
+    return 1
+  fi
+
+  if ! "${READELF}" --dyn-syms --wide "${so}" |
+    awk '$8 == "__cxa_throw" && $7 != "UND" {found = 1} END {exit !found}'; then
+    echo "ERROR: ${abi}: __cxa_throw is not defined; libc++abi was not linked in statically" >&2
+    return 1
+  fi
+}
+
+# HEAD 是否正好落在 LLVM_TAG 上（浅克隆 + annotated tag 也能判断）
+llvm_checkout_matches_tag() {
+  local llvm_src="$1"
+  local head_tag
+  head_tag="$(git -C "${llvm_src}" describe --tags --exact-match HEAD 2>/dev/null || true)"
+  [[ "${head_tag}" == "${LLVM_TAG}" ]]
+}
+
 # 稀疏克隆 llvm-project，只取 libc++ 构建需要的目录
 prepare_llvm_sources() {
   local llvm_src="${WORK_DIR}/llvm-project"
 
-  if [[ -f "${llvm_src}/runtimes/CMakeLists.txt" ]]; then
+  if [[ -d "${llvm_src}" ]] && llvm_checkout_matches_tag "${llvm_src}"; then
     echo "Reusing existing llvm-project checkout at ${llvm_src}"
     return 0
   fi
@@ -155,11 +200,20 @@ prepare_llvm_sources() {
   echo "Cloning llvm-project ${LLVM_TAG} (sparse checkout)..."
   mkdir -p "${WORK_DIR}"
   rm -rf "${llvm_src}"
+  # annotated tag + --depth 1 时 git 会打印
+  #   warning: refs/tags/llvmorg-... is not a commit!
+  # 这只是浅克隆解析 tag 对象时的噪声，不代表检出的版本不对；克隆后用
+  # llvm_checkout_matches_tag 确认 HEAD 确实在该 tag 上，避免误用别的提交。
   git clone --filter=blob:none --no-checkout --depth 1 --branch "${LLVM_TAG}" \
     https://github.com/llvm/llvm-project.git "${llvm_src}"
   git -C "${llvm_src}" sparse-checkout init --cone
   git -C "${llvm_src}" sparse-checkout set cmake libcxx libcxxabi libunwind runtimes llvm/cmake
   git -C "${llvm_src}" checkout
+
+  if ! llvm_checkout_matches_tag "${llvm_src}"; then
+    echo "ERROR: ${llvm_src} is not at ${LLVM_TAG}; refusing to build a mismatched libc++" >&2
+    exit 1
+  fi
 }
 
 build_abi() {
@@ -171,6 +225,17 @@ build_abi() {
   rm -rf "${build_dir}"
 
   echo "Configuring libc++ for ${abi} (API ${API})..."
+  # 选项以 llvm-project 自带的 libcxx/cmake/caches/AndroidNDK.cmake 为准：
+  #   * benchmarks 依赖 third-party/benchmark 子模块，稀疏克隆里是空目录，
+  #     configure 阶段 ExternalProject_Add 会直接报 "No download info given"，
+  #     所以 LIBCXX_INCLUDE_BENCHMARKS 必须关掉（测试/docs 同理，runner 上没有
+  #     lit 需要的 llvm/utils/llvm-lit）。
+  #   * LIBCXX_SHARED_OUTPUT_NAME 不设的话产物叫 libc++.so，脚本找不到
+  #     libc++_shared.so。
+  #   * LIBCXX_ABI_NAMESPACE 必须是 __ndk1：NDK 头文件用的就是 __ndk1，
+  #     libc++ 默认的 __1 会让 App 链接时符号全部对不上。
+  #   * Android 上 CMAKE_PLATFORM_NO_VERSIONED_SONAME 生效，若再开 ABI linker
+  #     script，生成的脚本会覆盖同名 .so，必须关掉。
   cmake -G Ninja \
     -S "${llvm_src}/runtimes" \
     -B "${build_dir}" \
@@ -179,10 +244,22 @@ build_abi() {
     -DANDROID_PLATFORM="android-${API}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
+    -DLLVM_INCLUDE_TESTS=OFF \
+    -DLLVM_INCLUDE_DOCS=OFF \
+    -DLLVM_INCLUDE_BENCHMARKS=OFF \
+    -DLIBCXX_INCLUDE_TESTS=OFF \
+    -DLIBCXX_INCLUDE_DOCS=OFF \
+    -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+    -DLIBCXXABI_INCLUDE_TESTS=OFF \
+    -DLIBUNWIND_INCLUDE_TESTS=OFF \
     -DLIBCXX_ENABLE_SHARED=ON \
     -DLIBCXX_ENABLE_STATIC=OFF \
+    -DLIBCXX_SHARED_OUTPUT_NAME=c++_shared \
+    -DLIBCXX_ABI_VERSION=1 \
+    -DLIBCXX_ABI_NAMESPACE=__ndk1 \
     -DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON \
-    -DLIBCXXABI_ENABLE_SHARED=ON \
+    -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT=OFF \
+    -DLIBCXXABI_ENABLE_SHARED=OFF \
     -DLIBCXXABI_ENABLE_STATIC=OFF \
     -DLIBCXXABI_USE_LLVM_UNWINDER=ON \
     -DLIBCXXABI_ENABLE_STATIC_UNWINDER=ON \
@@ -204,6 +281,7 @@ build_abi() {
   fi
 
   verify_elf32_16kb "${so}" "${abi}"
+  verify_libcxx_layout "${so}" "${abi}"
 
   mkdir -p "${OUT_DIR}/${abi}"
   cp -f "${so}" "${OUT_DIR}/${abi}/libc++_shared.so"
@@ -229,6 +307,7 @@ if [[ ${FORCE} -eq 0 ]]; then
     # shellcheck disable=SC2086
     for abi in ${ABIS}; do
       verify_elf32_16kb "${OUT_DIR}/${abi}/libc++_shared.so" "${abi}"
+      verify_libcxx_layout "${OUT_DIR}/${abi}/libc++_shared.so" "${abi}"
     done
     echo "Nothing to do. Use --force to rebuild."
     exit 0
