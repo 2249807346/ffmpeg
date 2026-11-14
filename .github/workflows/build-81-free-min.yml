@@ -1,4 +1,4 @@
-name: Build 8.1 LTS (Free Min variant — Maven alias source)
+name: Build 8.1 LTS
 
 # Publishes as ffmpeg-kit-min: Arthenica's original "min" scope is zero
 # external libraries -- bare FFmpeg + Android system libs (MediaCodec/zlib,
@@ -14,7 +14,7 @@ jobs:
   build:
     name: Build ffmpeg-kit 8.1 LTS (free-min, arm64-v8a + x86_64)
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 360
 
     defaults:
       run:
@@ -72,14 +72,13 @@ jobs:
             git archive FETCH_HEAD | tar -x
           fi
 
-      - name: Build free-min variant (arm64-v8a + x86_64)
+      - name: Build free-min variant (all ABIs)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           touch build.log
           set +e
-          ./android.sh --enable-android-media-codec --enable-android-zlib \
-            --disable-arm-v7a --disable-arm-v7a-neon --disable-x86
+          ./android.sh --enable-android-media-codec --enable-android-zlib
           BUILD_EXIT=$?
           exit "$BUILD_EXIT"
 
@@ -175,4 +174,4 @@ jobs:
         with:
           name: ffmpeg-kit-81-free-min-arm64-v8a-x86_64
           path: android-8.1-lts/prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar
-          retention-days: 3
+          retention-days: 30
