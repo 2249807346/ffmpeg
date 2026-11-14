@@ -12,7 +12,7 @@ on:
 
 jobs:
   build:
-    name: Build ffmpeg-kit 8.1 LTS (free-min, arm64-v8a + x86_64)
+    name: Build ffmpeg-kit 8.1 LTS (free-min, all ABIs)
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -71,6 +71,17 @@ jobs:
             git fetch --depth=1 origin ci-cache-81-free-min
             git archive FETCH_HEAD | tar -x
           fi
+
+      # 32 位 libc++_shared.so 在 NDK 中只有 4 KB 对齐（64 位从 r27c 起是 16 KB）。
+      # 该步骤生成 16 KB 版本，android.sh 在打包 AAR 前自动替换。
+      - name: Cache 16 KB aligned libc++ (32-bit ABIs)
+        uses: actions/cache@v6
+        with:
+          path: android-8.1-lts/prebuilt/libcxx-16kb
+          key: libcxx-16kb-${{ hashFiles('tools/build-libcxx-16kb.sh') }}
+
+      - name: Build 16 KB aligned libc++_shared.so (32-bit ABIs)
+        run: bash ../tools/build-libcxx-16kb.sh
 
       - name: Build free-min variant (all ABIs)
         env:
@@ -172,6 +183,6 @@ jobs:
       - name: Upload AAR artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ffmpeg-kit-81-free-min-arm64-v8a-x86_64
+          name: ffmpeg-kit-81-free-min-all-abis
           path: android-8.1-lts/prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar
           retention-days: 30

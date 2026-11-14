@@ -376,6 +376,18 @@ if [[ -n ${ANDROID_ARCHITECTURES} ]]; then
 
   echo -e -n "\n"
 
+  # 32 位 ABI 的 libc++_shared.so 在 NDK 里只有 4 KB 对齐（64 位从 r27c 起是 16 KB）。
+  # tools/build-libcxx-16kb.sh 产出 16 KB 版本时，用它替换 ndk-build 从 NDK 复制出来的副本。
+  LIBCXX_16KB_DIR="${BASEDIR}/prebuilt/libcxx-16kb"
+  if [[ -d "${LIBCXX_16KB_DIR}" ]]; then
+    for libcxx_abi in armeabi-v7a x86; do
+      if [[ -f "${LIBCXX_16KB_DIR}/${libcxx_abi}/libc++_shared.so" ]] && [[ -d "${BASEDIR}/android/libs/${libcxx_abi}" ]]; then
+        cp -f "${LIBCXX_16KB_DIR}/${libcxx_abi}/libc++_shared.so" "${BASEDIR}/android/libs/${libcxx_abi}/libc++_shared.so" 1>>"${BASEDIR}"/build.log 2>&1 || exit 1
+        echo -e "INFO: Replaced ${libcxx_abi}/libc++_shared.so with the 16 KB aligned build.\n" 1>>"${BASEDIR}"/build.log 2>&1
+      fi
+    done
+  fi
+
   # DO NOT BUILD ANDROID ARCHIVE
   if [[ ${NO_ARCHIVE} -ne 1 ]]; then
 
