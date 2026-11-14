@@ -236,6 +236,9 @@ build_abi() {
   #     libc++ 默认的 __1 会让 App 链接时符号全部对不上。
   #   * Android 上 CMAKE_PLATFORM_NO_VERSIONED_SONAME 生效，若再开 ABI linker
   #     script，生成的脚本会覆盖同名 .so，必须关掉。
+  #   * libc++abi 的 CMake 硬性要求 shared/static 至少开一个，否则 configure
+  #     直接 FATAL_ERROR。这里只关 shared（避免产出没人打包的 libc++abi.so），
+  #     静态库保留着，c++abi 的 object library 仍然会被并进 libc++_shared.so。
   cmake -G Ninja \
     -S "${llvm_src}/runtimes" \
     -B "${build_dir}" \
@@ -260,7 +263,7 @@ build_abi() {
     -DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON \
     -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT=OFF \
     -DLIBCXXABI_ENABLE_SHARED=OFF \
-    -DLIBCXXABI_ENABLE_STATIC=OFF \
+    -DLIBCXXABI_ENABLE_STATIC=ON \
     -DLIBCXXABI_USE_LLVM_UNWINDER=ON \
     -DLIBCXXABI_ENABLE_STATIC_UNWINDER=ON \
     -DLIBUNWIND_ENABLE_SHARED=OFF \
